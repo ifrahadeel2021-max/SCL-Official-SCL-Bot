@@ -1,1 +1,1 @@
-{"name": "your-package-name", "version": "1.0.0", "main": "index.ts", "scripts": {"start": "node index.ts"}}
+{"name":"scl-bot","version":"1.0.0","type":"module","scripts":{"start":"node index.ts"},"dependencies":{"discord.js":"^14.18.0"}}
