@@ -100,6 +100,19 @@ interface GtnEvent {
 
 const events = new Map<string, GtnEvent>();
 
+// ─── Promotion Types ─────────────────────────────────────────────────────────
+
+interface Promotion {
+  id: string;
+  serverName: string;
+  startDate: Date;
+  durationDays: number;
+  scheduledById: string;
+  scheduledAt: Date;
+}
+
+const promotions = new Map<string, Promotion>();
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function shortId(): string {
@@ -121,6 +134,57 @@ function formatName(value: string): string {
 
 function getMaxPlayers(format: MatchFormat): number {
   return { "2v2": 4, "3v3": 6, "4v4": 8 }[format];
+}
+
+// ─── Promotion Helpers ───────────────────────────────────────────────────────
+
+function formatRelativeTime(date: Date): string {
+  const diffMs = date.getTime() - Date.now();
+  if (diffMs <= 0) return "NOW";
+  const diffMins  = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays  = Math.floor(diffMs / 86400000);
+  if (diffMins < 60)  return `In ${diffMins} minute${diffMins !== 1 ? "s" : ""}`;
+  if (diffHours < 24) return `In ${diffHours} hour${diffHours !== 1 ? "s" : ""}`;
+  return `In ${diffDays} day${diffDays !== 1 ? "s" : ""}`;
+}
+
+function formatPromotionDate(date: Date): string {
+  const d = date.getDate();
+  const m = date.getMonth() + 1;
+  const y = String(date.getFullYear()).slice(-2);
+  return `${d}/${m}/${y}`;
+}
+
+function promotionEnd(p: Promotion): Date {
+  return new Date(p.startDate.getTime() + p.durationDays * 86400000);
+}
+
+function isActive(p: Promotion): boolean {
+  const now = new Date();
+  return now >= p.startDate && now < promotionEnd(p);
+}
+
+function isUpcoming(p: Promotion): boolean {
+  return new Date() < p.startDate;
+}
+
+function parsePromotionDate(dateStr: string, timeStr: string): Date | null {
+  const dp = dateStr.split("/");
+  const tp = timeStr.split(":");
+  if (dp.length !== 3 || tp.length !== 2) return null;
+  const [day, month, year] = dp.map(Number);
+  const [hour, minute]     = tp.map(Number);
+  if ([day, month, year, hour, minute].some(isNaN)) return null;
+  const d = new Date(2000 + year, month - 1, day, hour, minute, 0, 0);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function findConflict(start: Date, durationDays: number): Promotion | undefined {
+  const end = new Date(start.getTime() + durationDays * 86400000);
+  return Array.from(promotions.values()).find((p) => {
+    return start < promotionEnd(p) && end > p.startDate;
+  });
 }
 
 // ─── League Embeds / Buttons ────────────────────────────────────────────────
@@ -367,6 +431,33 @@ const commands = [
     .setDescription("End an active event and unlock general chat")
     .addStringOption((o) =>
       o.setName("id").setDescription("Event ID to end").setRequired(true)
+    ),
+
+  // Promotion Timings
+  new SlashCommandBuilder()
+    .setName("promotion")
+    .setDescription("Promotion timing management")
+    .addSubcommand((sub) =>
+      sub
+        .setName("schedule")
+        .setDescription("Select The Promotion Timings — schedule a new server promotion")
+        .addStringOption((o) =>
+          o.setName("server").setDescription("Server name").setRequired(true)
+        )
+        .addStringOption((o) =>
+          o.setName("date").setDescription("Date of promotion (DD/MM/YY, e.g. 22/03/26)").setRequired(true)
+        )
+        .addStringOption((o) =>
+          o.setName("time").setDescription("Time in 24h format (HH:MM, e.g. 15:00)").setRequired(true)
+        )
+        .addIntegerOption((o) =>
+          o.setName("duration").setDescription("Duration in days").setRequired(true).setMinValue(1)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("list")
+        .setDescription("View the full promotion schedule")
     ),
 ];
 
@@ -888,6 +979,143 @@ async function handleEndEventButton(btn: ButtonInteraction, ev: GtnEvent) {
   });
 }
 
+// ─── Promotion Handlers ──────────────────────────────────────────────────────
+
+const PROMOTION_ALLOWED_USERS = ["1180944141291634728", "1459790270370676798"];
+
+async function handleSchedulePromotion(interaction: ChatInputCommandInteraction) {
+  if (!PROMOTION_ALLOWED_USERS.includes(interaction.user.id)) {
+    await interaction.reply({
+      content: "You do not have permission to schedule promotions.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const serverName  = interaction.options.getString("server",   true);
+  const dateStr     = interaction.options.getString("date",     true);
+  const timeStr     = interaction.options.getString("time",     true);
+  const durationDays = interaction.options.getInteger("duration", true);
+
+  const startDate = parsePromotionDate(dateStr, timeStr);
+
+  if (!startDate) {
+    await interaction.reply({
+      content: "Invalid date or time format. Use DD/MM/YY for date (e.g. 22/03/26) and HH:MM for time (e.g. 15:00).",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (startDate <= new Date()) {
+    await interaction.reply({
+      content: "The promotion date must be in the future.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const conflict = findConflict(startDate, durationDays);
+  if (conflict) {
+    await interaction.reply({
+      content: `A scheduling conflict was detected with **${conflict.serverName}** (${formatPromotionDate(conflict.startDate)} – ${formatPromotionDate(promotionEnd(conflict))}). Two promotions cannot run at the same time.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const id: string = shortId();
+  const promotion: Promotion = {
+    id,
+    serverName,
+    startDate,
+    durationDays,
+    scheduledById: interaction.user.id,
+    scheduledAt: new Date(),
+  };
+
+  promotions.set(id, promotion);
+
+  await interaction.reply({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle("Promotion Scheduled")
+        .setColor(0x5865f2)
+        .setDescription(
+          `1).\nServer | ${serverName}\nDate: ${formatRelativeTime(startDate)} | ${formatPromotionDate(startDate)}\nDuration: ${durationDays} DAYS`
+        )
+        .addFields(
+          { name: "Promotion ID", value: `\`${id}\``, inline: true },
+          { name: "Scheduled by", value: `<@${interaction.user.id}>`, inline: true },
+        )
+        .setTimestamp(),
+    ],
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleListPromotions(interaction: ChatInputCommandInteraction) {
+  if (!PROMOTION_ALLOWED_USERS.includes(interaction.user.id)) {
+    await interaction.reply({
+      content: "You do not have permission to view the promotion schedule.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const now = new Date();
+
+  const visible = Array.from(promotions.values())
+    .filter((p) => promotionEnd(p) > now)
+    .sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
+
+  if (visible.length === 0) {
+    await interaction.reply({
+      content: "No promotions are currently scheduled.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const active   = visible.filter(isActive);
+  const upcoming = visible.filter(isUpcoming);
+
+  let description = "";
+  let counter = 1;
+
+  if (active.length > 0) {
+    description += "**Currently Active**\n";
+    for (const p of active) {
+      description += `${counter}).\nServer | ${p.serverName}\nDate: NOW | ${formatPromotionDate(p.startDate)}\nDuration: ${p.durationDays} DAYS\n\n`;
+      counter++;
+    }
+  }
+
+  if (upcoming.length > 0) {
+    const next = upcoming[0];
+    description += `**Next Promotion**\n${counter}).\nServer | ${next.serverName}\nDate: ${formatRelativeTime(next.startDate)} | ${formatPromotionDate(next.startDate)}\nDuration: ${next.durationDays} DAYS\n\n`;
+    counter++;
+
+    if (upcoming.length > 1) {
+      description += "**Remaining Schedule**\n";
+      for (const p of upcoming.slice(1)) {
+        description += `${counter}).\nServer | ${p.serverName}\nDate: ${formatRelativeTime(p.startDate)} | ${formatPromotionDate(p.startDate)}\nDuration: ${p.durationDays} DAYS\n\n`;
+        counter++;
+      }
+    }
+  }
+
+  await interaction.reply({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle("Promotion Schedule")
+        .setDescription(description.trim())
+        .setColor(0x5865f2)
+        .setTimestamp(),
+    ],
+  });
+}
+
 // ─── Message Listener (guess detection) ─────────────────────────────────────
 
 client.on("messageCreate", async (message: Message) => {
@@ -961,6 +1189,12 @@ client.on("interactionCreate", async (interaction) => {
 
     if (cmd.commandName === "endevent") {
       await handleEndEvent(cmd);
+    }
+
+    if (cmd.commandName === "promotion") {
+      const sub = cmd.options.getSubcommand();
+      if (sub === "schedule") await handleSchedulePromotion(cmd);
+      if (sub === "list")     await handleListPromotions(cmd);
     }
 
     return;
