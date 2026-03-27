@@ -109,6 +109,7 @@ interface Promotion {
   durationDays: number;
   scheduledById: string;
   scheduledAt: Date;
+  notified: boolean;
 }
 
 const promotions = new Map<string, Promotion>();
@@ -169,13 +170,39 @@ function isUpcoming(p: Promotion): boolean {
   return new Date() < p.startDate;
 }
 
+function parseRelativeTime(timeStr: string): number | null {
+  const s = timeStr.trim().toLowerCase();
+  // Patterns: 1h, 2h, 30m, 1 hour, 2 hours, 30 minutes, 30 min, 1h30m
+  const combined = s.match(/^(\d+)h(?:(\d+)m)?$/);
+  if (combined) {
+    const hours   = parseInt(combined[1], 10);
+    const minutes = combined[2] ? parseInt(combined[2], 10) : 0;
+    return (hours * 60 + minutes) * 60000;
+  }
+  const hoursOnly = s.match(/^(\d+)\s*h(?:ours?)?$/);
+  if (hoursOnly) return parseInt(hoursOnly[1], 10) * 3600000;
+  const minsOnly = s.match(/^(\d+)\s*m(?:in(?:utes?)?)?$/);
+  if (minsOnly) return parseInt(minsOnly[1], 10) * 60000;
+  return null;
+}
+
 function parsePromotionDate(dateStr: string, timeStr: string): Date | null {
   const dp = dateStr.split("/");
-  const tp = timeStr.split(":");
-  if (dp.length !== 3 || tp.length !== 2) return null;
+  if (dp.length !== 3) return null;
   const [day, month, year] = dp.map(Number);
-  const [hour, minute]     = tp.map(Number);
-  if ([day, month, year, hour, minute].some(isNaN)) return null;
+  if ([day, month, year].some(isNaN)) return null;
+
+  // Try relative time first (e.g. 1h, 30m, 2 hours)
+  const relativeMs = parseRelativeTime(timeStr);
+  if (relativeMs !== null) {
+    return new Date(Date.now() + relativeMs);
+  }
+
+  // Fall back to HH:MM
+  const tp = timeStr.split(":");
+  if (tp.length !== 2) return null;
+  const [hour, minute] = tp.map(Number);
+  if ([hour, minute].some(isNaN)) return null;
   const d = new Date(2000 + year, month - 1, day, hour, minute, 0, 0);
   return isNaN(d.getTime()) ? null : d;
 }
@@ -448,7 +475,7 @@ const commands = [
           o.setName("date").setDescription("Date of promotion (DD/MM/YY, e.g. 22/03/26)").setRequired(true)
         )
         .addStringOption((o) =>
-          o.setName("time").setDescription("Time in 24h format (HH:MM, e.g. 15:00)").setRequired(true)
+          o.setName("time").setDescription("Specific time (15:00) or relative (1h, 30m, 2 hours)").setRequired(true)
         )
         .addIntegerOption((o) =>
           o.setName("duration").setDescription("Duration in days").setRequired(true).setMinValue(1)
@@ -489,6 +516,43 @@ client.once("ready", async () => {
   } catch (err) {
     console.error("Failed to register commands:", err);
   }
+
+  // ── Promotion notification ticker ─────────────────────────────────────────
+  setInterval(async () => {
+    const now = new Date();
+    for (const p of promotions.values()) {
+      if (p.notified) continue;
+      if (now < p.startDate) continue;
+
+      p.notified = true;
+
+      try {
+        const user = await client.users.fetch(p.scheduledById);
+        const dm   = await user.createDM();
+        await dm.send({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle("Promotion Time!")
+              .setDescription(
+                `It is time for the promotion of **${p.serverName}**. Please start the promotion now!`
+              )
+              .setColor(0x2ecc71)
+              .addFields(
+                { name: "Server",      value: p.serverName,                                               inline: true },
+                { name: "Started",     value: formatPromotionDate(p.startDate),                           inline: true },
+                { name: "Duration",    value: `${p.durationDays} DAYS`,                                   inline: true },
+                { name: "Ends",        value: formatPromotionDate(promotionEnd(p)),                       inline: true },
+                { name: "Scheduled",   value: formatPromotionDate(p.scheduledAt),                        inline: true },
+                { name: "Promotion ID", value: `\`${p.id}\``,                                            inline: true },
+              )
+              .setTimestamp(),
+          ],
+        });
+      } catch {
+        console.error(`Failed to DM promotion notification for ${p.serverName}`);
+      }
+    }
+  }, 60000);
 });
 
 // ─── League Handlers ────────────────────────────────────────────────────────
@@ -1001,7 +1065,7 @@ async function handleSchedulePromotion(interaction: ChatInputCommandInteraction)
 
   if (!startDate) {
     await interaction.reply({
-      content: "Invalid date or time format. Use DD/MM/YY for date (e.g. 22/03/26) and HH:MM for time (e.g. 15:00).",
+      content: "Invalid format. Date must be DD/MM/YY (e.g. 22/03/26). Time can be a specific time (e.g. 15:00) or a relative duration (e.g. 1h, 30m, 2 hours).",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -1032,6 +1096,7 @@ async function handleSchedulePromotion(interaction: ChatInputCommandInteraction)
     durationDays,
     scheduledById: interaction.user.id,
     scheduledAt: new Date(),
+    notified: false,
   };
 
   promotions.set(id, promotion);
