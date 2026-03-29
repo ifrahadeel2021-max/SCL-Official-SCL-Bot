@@ -157,6 +157,14 @@ function formatPromotionDate(date: Date): string {
   return `${d}/${m}/${y}`;
 }
 
+/** Returns a DD/MM/YY string suitable for passing back into parsePromotionDate */
+function formatPromotionDateForParsing(date: Date): string {
+  const d  = String(date.getDate()).padStart(2, "0");
+  const m  = String(date.getMonth() + 1).padStart(2, "0");
+  const y  = String(date.getFullYear()).slice(-2);
+  return `${d}/${m}/${y}`;
+}
+
 function promotionEnd(p: Promotion): Date {
   return new Date(p.startDate.getTime() + p.durationDays * 86400000);
 }
@@ -186,6 +194,19 @@ function parseRelativeTime(timeStr: string): number | null {
   return null;
 }
 
+function parseTimeString(timeStr: string): { hour: number; minute: number } | null {
+  // HH:MM format (e.g. "15:00", "9:30")
+  const tp = timeStr.split(":");
+  if (tp.length === 2) {
+    const hour   = Number(tp[0]);
+    const minute = Number(tp[1]);
+    if (!isNaN(hour) && !isNaN(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      return { hour, minute };
+    }
+  }
+  return null;
+}
+
 function parsePromotionDate(dateStr: string, timeStr: string | null): Date | null {
   const dp = dateStr.split("/");
   if (dp.length !== 3) return null;
@@ -200,15 +221,11 @@ function parsePromotionDate(dateStr: string, timeStr: string | null): Date | nul
   if (selectedDate < todayMidnight) {
     if (timeStr) {
       const relativeMs = parseRelativeTime(timeStr);
-      if (relativeMs !== null) {
-        return new Date(Date.now() + relativeMs);
-      }
-      
-      const tp = timeStr.split(":");
-      if (tp.length !== 2) return null;
-      const [hour, minute] = tp.map(Number);
-      if ([hour, minute].some(isNaN)) return null;
-      return new Date(2000 + year, month - 1, day, hour, minute, 0, 0);
+      if (relativeMs !== null) return new Date(Date.now() + relativeMs);
+
+      const parsed = parseTimeString(timeStr);
+      if (!parsed) return null;
+      return new Date(2000 + year, month - 1, day, parsed.hour, parsed.minute, 0, 0);
     }
     // Default: use current time
     return new Date(2000 + year, month - 1, day, now.getHours(), now.getMinutes(), 0, 0);
@@ -216,45 +233,41 @@ function parsePromotionDate(dateStr: string, timeStr: string | null): Date | nul
 
   // TODAY - TIME IS REQUIRED
   if (selectedDate.getTime() === todayMidnight.getTime()) {
-    if (!timeStr) return null; // Time required for today
-    
-    const relativeMs = parseRelativeTime(timeStr);
-    if (relativeMs !== null) {
-      return new Date(Date.now() + relativeMs);
-    }
+    if (!timeStr) return null;
 
-    const tp = timeStr.split(":");
-    if (tp.length !== 2) return null;
-    const [hour, minute] = tp.map(Number);
-    if ([hour, minute].some(isNaN)) return null;
-    return new Date(2000 + year, month - 1, day, hour, minute, 0, 0);
+    const relativeMs = parseRelativeTime(timeStr);
+    if (relativeMs !== null) return new Date(Date.now() + relativeMs);
+
+    const parsed = parseTimeString(timeStr);
+    if (!parsed) return null;
+    return new Date(2000 + year, month - 1, day, parsed.hour, parsed.minute, 0, 0);
   }
 
   // FUTURE DATE - TIME IS OPTIONAL
   if (timeStr) {
     const relativeMs = parseRelativeTime(timeStr);
-    if (relativeMs !== null) {
-      return new Date(Date.now() + relativeMs);
-    }
-    
-    const tp = timeStr.split(":");
-    if (tp.length !== 2) return null;
-    const [hour, minute] = tp.map(Number);
-    if ([hour, minute].some(isNaN)) return null;
-    return new Date(2000 + year, month - 1, day, hour, minute, 0, 0);
+    if (relativeMs !== null) return new Date(Date.now() + relativeMs);
+
+    const parsed = parseTimeString(timeStr);
+    if (!parsed) return null;
+    return new Date(2000 + year, month - 1, day, parsed.hour, parsed.minute, 0, 0);
   }
 
-  // Default for future dates: same time tomorrow
-  const tomorrowSameTime = new Date(now);
-  tomorrowSameTime.setDate(tomorrowSameTime.getDate() + 1);
-  return tomorrowSameTime;
+  // Default for future dates: midnight of that day
+  return new Date(2000 + year, month - 1, day, 0, 0, 0, 0);
 }
 
-function findConflict(start: Date, durationDays: number): Promotion | undefined {
+function findConflict(start: Date, durationDays: number, excludeId?: string): Promotion | undefined {
   const end = new Date(start.getTime() + durationDays * 86400000);
   return Array.from(promotions.values()).find((p) => {
+    if (excludeId && p.id === excludeId) return false;
     return start < promotionEnd(p) && end > p.startDate;
   });
+}
+
+function getSortedPromotions(): Promotion[] {
+  return Array.from(promotions.values())
+    .sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
 }
 
 // ─── League Embeds / Buttons ────────────────────────────────────────────
@@ -528,6 +541,34 @@ const commands = [
       sub
         .setName("list")
         .setDescription("View the full promotion schedule")
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("edit")
+        .setDescription("Edit an existing promotion")
+        .addStringOption((o) =>
+          o.setName("promotion_id").setDescription("Promotion ID to edit").setRequired(true)
+        )
+        .addStringOption((o) =>
+          o.setName("server_name").setDescription("New server name").setRequired(false)
+        )
+        .addStringOption((o) =>
+          o.setName("date").setDescription("New date (DD/MM/YY, e.g. 22/03/26)").setRequired(false)
+        )
+        .addStringOption((o) =>
+          o.setName("time").setDescription("New time (15:00, 1h, 30m) — required if changing to today").setRequired(false)
+        )
+        .addIntegerOption((o) =>
+          o.setName("duration").setDescription("New duration in days").setRequired(false).setMinValue(1)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("delete")
+        .setDescription("Delete a scheduled promotion")
+        .addStringOption((o) =>
+          o.setName("promotion_id").setDescription("Promotion ID to delete").setRequired(true)
+        )
     ),
 ];
 
@@ -1167,9 +1208,7 @@ async function handleListPromotions(interaction: ChatInputCommandInteraction) {
 
   const now = new Date();
 
-  const visible = Array.from(promotions.values())
-    .filter((p) => promotionEnd(p) > now)
-    .sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
+  const visible = getSortedPromotions().filter((p) => promotionEnd(p) > now);
 
   if (visible.length === 0) {
     await interaction.reply({
@@ -1183,26 +1222,23 @@ async function handleListPromotions(interaction: ChatInputCommandInteraction) {
   const upcoming = visible.filter(isUpcoming);
 
   let description = "";
-  let counter = 1;
 
   if (active.length > 0) {
-    description += "**Currently Active**\n";
+    description += "**🟢 Currently Active**\n";
     for (const p of active) {
-      description += `${counter}).\nServer | ${p.serverName}\nDate: NOW | ${formatPromotionDate(p.startDate)}\nDuration: ${p.durationDays} DAYS\n\n`;
-      counter++;
+      const endsIn = formatRelativeTime(promotionEnd(p)).replace("In ", "Ends in ");
+      description += `\`${p.id}\` — **${p.serverName}**\nStarted: ${formatPromotionDate(p.startDate)} | ${endsIn}\nDuration: ${p.durationDays} day${p.durationDays !== 1 ? "s" : ""}\n\n`;
     }
   }
 
   if (upcoming.length > 0) {
     const next = upcoming[0];
-    description += `**Next Promotion**\n${counter}).\nServer | ${next.serverName}\nDate: ${formatRelativeTime(next.startDate)} | ${formatPromotionDate(next.startDate)}\nDuration: ${next.durationDays} DAYS\n\n`;
-    counter++;
+    description += `**⏭️ Next in Queue**\n\`${next.id}\` — **${next.serverName}**\nStarts: ${formatRelativeTime(next.startDate)} | ${formatPromotionDate(next.startDate)}\nDuration: ${next.durationDays} day${next.durationDays !== 1 ? "s" : ""}\n\n`;
 
     if (upcoming.length > 1) {
-      description += "**Remaining Schedule**\n";
+      description += "**📋 Upcoming**\n";
       for (const p of upcoming.slice(1)) {
-        description += `${counter}).\nServer | ${p.serverName}\nDate: ${formatRelativeTime(p.startDate)} | ${formatPromotionDate(p.startDate)}\nDuration: ${p.durationDays} DAYS\n\n`;
-        counter++;
+        description += `\`${p.id}\` — **${p.serverName}**\nStarts: ${formatRelativeTime(p.startDate)} | ${formatPromotionDate(p.startDate)}\nDuration: ${p.durationDays} day${p.durationDays !== 1 ? "s" : ""}\n\n`;
       }
     }
   }
@@ -1213,8 +1249,157 @@ async function handleListPromotions(interaction: ChatInputCommandInteraction) {
         .setTitle("Promotion Schedule")
         .setDescription(description.trim())
         .setColor(0x5865f2)
+        .setFooter({ text: "Use /promotion edit or /promotion delete with the ID shown above" })
         .setTimestamp(),
     ],
+  });
+}
+
+async function handleEditPromotion(interaction: ChatInputCommandInteraction) {
+  if (!PROMOTION_ALLOWED_USERS.includes(interaction.user.id)) {
+    await interaction.reply({
+      content: "You do not have permission to edit promotions.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const promotionId = interaction.options.getString("promotion_id", true).toUpperCase();
+  const promotion   = promotions.get(promotionId);
+
+  if (!promotion) {
+    await interaction.reply({
+      content: `No promotion found with ID \`${promotionId}\`. Use \`/promotion list\` to see all promotion IDs.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const newServerName  = interaction.options.getString("server_name", false);
+  const newDateStr     = interaction.options.getString("date",         false);
+  const newTimeStr     = interaction.options.getString("time",         false);
+  const newDuration    = interaction.options.getInteger("duration",    false);
+
+  if (!newServerName && !newDateStr && !newTimeStr && !newDuration) {
+    await interaction.reply({
+      content: "You must provide at least one field to update (server_name, date, time, or duration).",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  // Resolve new start date
+  let newStartDate = promotion.startDate;
+  if (newDateStr || newTimeStr) {
+    // Build the date string — fall back to existing date if only time is changing
+    const dateStr = newDateStr ?? formatPromotionDateForParsing(promotion.startDate);
+    const timeStr = newTimeStr ?? null;
+    const parsed  = parsePromotionDate(dateStr, timeStr);
+    if (!parsed) {
+      await interaction.reply({
+        content: "Invalid date/time format. Date must be DD/MM/YY (e.g. 22/03/26). Time can be HH:MM (e.g. 15:00), 1h, 30m, or 1h30m.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    newStartDate = parsed;
+  }
+
+  const newDurationDays = newDuration ?? promotion.durationDays;
+
+  // Check for conflicts, excluding this promotion itself
+  const conflict = findConflict(newStartDate, newDurationDays, promotionId);
+  if (conflict) {
+    await interaction.reply({
+      content: `A scheduling conflict was detected with **${conflict.serverName}** (\`${conflict.id}\`, ${formatPromotionDate(conflict.startDate)} – ${formatPromotionDate(promotionEnd(conflict))}). Two promotions cannot overlap.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  // Apply updates
+  const oldServerName = promotion.serverName;
+  const oldStartDate  = promotion.startDate;
+  const oldDuration   = promotion.durationDays;
+
+  if (newServerName)  promotion.serverName  = newServerName;
+  if (newDateStr || newTimeStr) promotion.startDate = newStartDate;
+  if (newDuration)    promotion.durationDays = newDurationDays;
+
+  // Reset notified flag if the start date moved into the future
+  if (promotion.startDate > new Date()) {
+    promotion.notified = false;
+  }
+
+  const changes: string[] = [];
+  if (newServerName && newServerName !== oldServerName)
+    changes.push(`Server: **${oldServerName}** → **${newServerName}**`);
+  if (newDateStr || newTimeStr)
+    changes.push(`Date: **${formatPromotionDate(oldStartDate)}** → **${formatPromotionDate(promotion.startDate)}** (${formatRelativeTime(promotion.startDate)})`);
+  if (newDuration && newDuration !== oldDuration)
+    changes.push(`Duration: **${oldDuration} day${oldDuration !== 1 ? "s" : ""}** → **${newDurationDays} day${newDurationDays !== 1 ? "s" : ""}**`);
+
+  await interaction.reply({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle("Promotion Updated")
+        .setColor(0xf1c40f)
+        .addFields(
+          { name: "Promotion ID",  value: `\`${promotion.id}\``,                    inline: true },
+          { name: "Server",        value: promotion.serverName,                      inline: true },
+          { name: "Starts",        value: `${formatPromotionDate(promotion.startDate)} (${formatRelativeTime(promotion.startDate)})`, inline: false },
+          { name: "Duration",      value: `${promotion.durationDays} day${promotion.durationDays !== 1 ? "s" : ""}`, inline: true },
+          { name: "Changes",       value: changes.length > 0 ? changes.join("\n") : "No changes detected", inline: false },
+        )
+        .setTimestamp(),
+    ],
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+async function handleDeletePromotion(interaction: ChatInputCommandInteraction) {
+  if (!PROMOTION_ALLOWED_USERS.includes(interaction.user.id)) {
+    await interaction.reply({
+      content: "You do not have permission to delete promotions.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const promotionId = interaction.options.getString("promotion_id", true).toUpperCase();
+  const promotion   = promotions.get(promotionId);
+
+  if (!promotion) {
+    await interaction.reply({
+      content: `No promotion found with ID \`${promotionId}\`. Use \`/promotion list\` to see all promotion IDs.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  promotions.delete(promotionId);
+
+  const status = isActive(promotion)
+    ? "🟢 Was active"
+    : isUpcoming(promotion)
+    ? "⏳ Was upcoming"
+    : "✅ Had already ended";
+
+  await interaction.reply({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle("Promotion Deleted")
+        .setColor(0xed4245)
+        .addFields(
+          { name: "Promotion ID", value: `\`${promotionId}\``,                                                    inline: true },
+          { name: "Server",       value: promotion.serverName,                                                     inline: true },
+          { name: "Status",       value: status,                                                                   inline: true },
+          { name: "Was Scheduled", value: `${formatPromotionDate(promotion.startDate)} – ${formatPromotionDate(promotionEnd(promotion))}`, inline: false },
+          { name: "Deleted by",   value: `<@${interaction.user.id}>`,                                             inline: true },
+        )
+        .setTimestamp(),
+    ],
+    flags: MessageFlags.Ephemeral,
   });
 }
 
@@ -1297,6 +1482,8 @@ client.on("interactionCreate", async (interaction) => {
       const sub = cmd.options.getSubcommand();
       if (sub === "schedule") await handleSchedulePromotion(cmd);
       if (sub === "list")     await handleListPromotions(cmd);
+      if (sub === "edit")     await handleEditPromotion(cmd);
+      if (sub === "delete")   await handleDeletePromotion(cmd);
     }
 
     return;
