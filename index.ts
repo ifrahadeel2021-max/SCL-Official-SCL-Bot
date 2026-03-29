@@ -542,7 +542,7 @@ async function deployCommands() {
   console.log("Slash commands registered.");
 }
 
-// ─── Client ────────────────────────────────────────────────────────────
+// ─── Client ─────────────────────────────────────────────────��──────────
 
 const client = new Client({
   intents: [
@@ -1113,6 +1113,8 @@ async function handleSchedulePromotion(interaction: ChatInputCommandInteraction)
     });
     return;
   }
+
+  // REMOVED: Future date validation - now accepts past, present, and future dates
 
   const conflict = findConflict(startDate, durationDays);
   if (conflict) {
